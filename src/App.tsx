@@ -6,18 +6,20 @@ import {
   useMemo,
   useState,
 } from "react";
-import { collection, doc, getDocs, getDocsFromServer, updateDoc } from "firebase/firestore";
+import { doc, updateDoc } from "firebase/firestore";
+import {
+  ensureCatalogLoaded,
+  fetchArticuloById,
+  filterArticulos,
+  getCatalogFromMemory,
+  patchArticuloInCatalog,
+} from "./articulosService";
 import { db } from "./firebase";
 import { parseUbicacion } from "./parseUbicacion";
+import { addRecentArticulo, getRecentArticulos, updateRecentArticulo } from "./recentArticulos";
+import type { Articulo } from "./types";
 
-export type Articulo = {
-  id: string;
-  codigo?: string;
-  desc?: string;
-  alias?: string;
-  stock?: string | number;
-  ubicacion?: string;
-};
+export type { Articulo } from "./types";
 
 type ThemeName = "light" | "dark";
 
@@ -57,9 +59,8 @@ type AppCtx = {
   isModoPanolero: boolean;
   setIsModoPanolero: (v: boolean) => void;
   articulos: Articulo[];
-  loading: boolean;
   loadError: string | null;
-  refreshArticulos: (opts?: { fromServer?: boolean }) => Promise<void>;
+  loadCatalog: (opts?: { forceServer?: boolean }) => Promise<Articulo[]>;
 };
 
 const AppContext = createContext<AppCtx | null>(null);
@@ -104,32 +105,32 @@ function IconSettings({ active }: { active: boolean }) {
 }
 
 function BuscadorScreen() {
-  const { theme, isModoPanolero, articulos, loading, refreshArticulos } = useApp();
-  const [filtered, setFiltered] = useState<Articulo[]>([]);
+  const { isModoPanolero, loadCatalog, loadError } = useApp();
+  const [filtered, setFiltered] = useState<Articulo[]>(() => getRecentArticulos());
   const [searchText, setSearchText] = useState("");
+  const [buscando, setBuscando] = useState(false);
+  const [modoLista, setModoLista] = useState<"recientes" | "busqueda">("recientes");
   const [modalVisible, setModalVisible] = useState(false);
   const [itemEditando, setItemEditando] = useState<Articulo | null>(null);
   const [nuevoAlias, setNuevoAlias] = useState("");
 
-  useEffect(() => {
-    setFiltered(articulos);
-  }, [articulos]);
-
-  const handleSearch = (text: string) => {
-    setSearchText(text);
-    if (text.trim() === "") {
-      setFiltered(articulos);
+  const ejecutarBusqueda = async () => {
+    const q = searchText.trim();
+    if (!q) {
+      setFiltered(getRecentArticulos());
+      setModoLista("recientes");
       return;
     }
-    const palabrasBuscadas = text.toLowerCase().trim().split(/\s+/);
-    const filtrados = articulos.filter((item) => {
-      const codigo = item.codigo ? item.codigo.toLowerCase() : "";
-      const desc = item.desc ? item.desc.toLowerCase() : "";
-      const alias = item.alias ? item.alias.toLowerCase() : "";
-      const textoCompleto = `${codigo} ${desc} ${alias}`;
-      return palabrasBuscadas.every((palabra) => textoCompleto.includes(palabra));
-    });
-    setFiltered(filtrados);
+    setBuscando(true);
+    try {
+      const catalog = await loadCatalog();
+      const resultados = filterArticulos(catalog, q);
+      setFiltered(resultados);
+      setModoLista("busqueda");
+      for (const item of resultados.slice(0, 3)) addRecentArticulo(item);
+    } finally {
+      setBuscando(false);
+    }
   };
 
   const abrirModalAlias = (item: Articulo) => {
@@ -140,20 +141,35 @@ function BuscadorScreen() {
 
   const guardarAlias = async () => {
     if (!itemEditando) return;
+    const alias = nuevoAlias.trim();
     const articuloRef = doc(db, "articulos", itemEditando.id);
-    await updateDoc(articuloRef, { alias: nuevoAlias.trim() });
+    await updateDoc(articuloRef, { alias });
+    const actualizado = { ...itemEditando, alias };
+    patchArticuloInCatalog(itemEditando.id, { alias });
+    updateRecentArticulo(actualizado);
+    setFiltered((prev) =>
+      prev.map((a) => (a.id === itemEditando.id ? actualizado : a))
+    );
     setModalVisible(false);
     setItemEditando(null);
-    await refreshArticulos({ fromServer: true });
+    void fetchArticuloById(itemEditando.id);
   };
 
-  if (loading) {
+  if (buscando) {
     return (
       <div className="screen centro">
         <div className="spinner" />
+        <p className="hint" style={{ marginTop: 12 }}>
+          Buscando en el catálogo…
+        </p>
       </div>
     );
   }
+
+  const vacioMsg =
+    modoLista === "recientes"
+      ? "Sin búsquedas recientes. Escribí y presioná Enter para buscar."
+      : "No hay artículos que coincidan con la búsqueda.";
 
   return (
     <div className="screen">
@@ -163,20 +179,46 @@ function BuscadorScreen() {
 
       <input
         className="input-search"
-        placeholder="Buscar por código, descripción o alias..."
+        placeholder="Buscar por código, descripción o alias… (Enter)"
         value={searchText}
-        onChange={(e) => handleSearch(e.target.value)}
+        onChange={(e) => setSearchText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void ejecutarBusqueda();
+        }}
       />
+      <p className="hint" style={{ marginTop: -8, marginBottom: 12 }}>
+        {modoLista === "recientes"
+          ? "Últimos artículos consultados"
+          : "Resultados de búsqueda"}
+      </p>
+
+      {loadError ? <p className="empty">{loadError}</p> : null}
 
       {filtered.length === 0 ? (
-        <p className="empty">No hay artículos.</p>
+        <p className="empty">{vacioMsg}</p>
       ) : (
         filtered.map((item) => (
-          <div key={item.id} className="card">
+          <div
+            key={item.id}
+            className="card"
+            role="button"
+            tabIndex={0}
+            onClick={() => addRecentArticulo(item)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") addRecentArticulo(item);
+            }}
+          >
             <div className="row-between">
               <span className="codigo">{item.codigo}</span>
               {isModoPanolero && (
-                <button type="button" className="btn-alias" onClick={() => abrirModalAlias(item)}>
+                <button
+                  type="button"
+                  className="btn-alias"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    abrirModalAlias(item);
+                  }}
+                >
                   ✎ Alias
                 </button>
               )}
@@ -228,7 +270,9 @@ function ConfigScreen() {
     isModoPanolero,
     setIsModoPanolero,
     loadError,
+    loadCatalog,
   } = useApp();
+  const [actualizando, setActualizando] = useState(false);
   const [modalClaveVisible, setModalClaveVisible] = useState(false);
   const [claveIngresada, setClaveIngresada] = useState("");
 
@@ -292,6 +336,32 @@ function ConfigScreen() {
         </div>
       </div>
 
+      {isModoPanolero ? (
+        <div className="card-config" style={{ marginTop: 16 }}>
+          <div className="config-row">
+            <div style={{ flex: 1 }}>
+              <div className="desc" style={{ margin: 0, fontSize: 16 }}>
+                Actualizar catálogo
+              </div>
+              <div className="hint">
+                Descarga cambios de la nube (solo si hubo actualización desde escritorio).
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={actualizando}
+              onClick={() => {
+                setActualizando(true);
+                void loadCatalog({ forceServer: true }).finally(() => setActualizando(false));
+              }}
+            >
+              {actualizando ? "…" : "↻"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <p className="empty" style={{ marginTop: 40 }}>
         App web — Pañol
       </p>
@@ -344,11 +414,33 @@ function sortPosiciones(a: string, b: string) {
 }
 
 function EstanteriasScreen() {
-  const { articulos, loading } = useApp();
+  const { loadCatalog, loadError } = useApp();
+  const [articulos, setArticulos] = useState<Articulo[]>([]);
+  const [cargando, setCargando] = useState(true);
   const [estSearch, setEstSearch] = useState("");
+  const [filtroActivo, setFiltroActivo] = useState("");
+
+  useEffect(() => {
+    let cancel = false;
+    setCargando(true);
+    void loadCatalog()
+      .then((lista) => {
+        if (!cancel) setArticulos(lista);
+      })
+      .finally(() => {
+        if (!cancel) setCargando(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [loadCatalog]);
+
+  const aplicarFiltroEstanterias = () => {
+    setFiltroActivo(estSearch.trim());
+  };
 
   const articulosFiltrados = useMemo(() => {
-    const q = estSearch.trim().toLowerCase();
+    const q = filtroActivo.toLowerCase();
     if (!q) return articulos;
     const palabras = q.split(/\s+/).filter(Boolean);
     return articulos.filter((art) => {
@@ -357,7 +449,7 @@ function EstanteriasScreen() {
       const hay = `${p.raw} ${p.panol} ${p.estanteria} ${p.posicion}`.toLowerCase();
       return palabras.every((w) => hay.includes(w));
     });
-  }, [articulos, estSearch]);
+  }, [articulos, filtroActivo]);
 
   const tree = useMemo(() => {
     const t: Record<number, Record<string, Record<string, Articulo[]>>> = {};
@@ -374,15 +466,18 @@ function EstanteriasScreen() {
 
   const panoles = useMemo(() => Object.keys(tree).map(Number).sort((a, b) => a - b), [tree]);
 
-  if (loading) {
+  if (cargando) {
     return (
       <div className="screen centro">
         <div className="spinner" />
+        <p className="hint" style={{ marginTop: 12 }}>
+          Cargando estanterías…
+        </p>
       </div>
     );
   }
 
-  const emptyMsg = estSearch.trim()
+  const emptyMsg = filtroActivo
     ? "Ningún artículo coincide con la búsqueda en formato de estantería."
     : "No hay artículos con ubicación en formato pañol/estantería/posición (ej. 10065C o 4000SP).";
 
@@ -394,10 +489,14 @@ function EstanteriasScreen() {
         </div>
         <input
           className="input-search"
-          placeholder="Buscar ubicación (ej. 10065C, 4000SP, pañol 2…)…"
+          placeholder="Buscar ubicación… (Enter)"
           value={estSearch}
           onChange={(e) => setEstSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") aplicarFiltroEstanterias();
+          }}
         />
+        {loadError ? <p className="empty">{loadError}</p> : null}
         <p className="empty">{emptyMsg}</p>
       </div>
     );
@@ -410,9 +509,12 @@ function EstanteriasScreen() {
       </div>
       <input
         className="input-search"
-        placeholder="Buscar ubicación (ej. 10065C, 4000SP, 0065, SP)…"
+        placeholder="Buscar ubicación (ej. 10065C, 4000SP, 0065, SP)… (Enter)"
         value={estSearch}
         onChange={(e) => setEstSearch(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") aplicarFiltroEstanterias();
+        }}
       />
       <p className="hint" style={{ marginBottom: 12 }}>
         Formato: primer dígito = pañol (1–4), cuatro dígitos = estantería, letras = altura (ej. C o SP). Podés usar varias palabras.
@@ -485,34 +587,29 @@ export default function App() {
   const [isModoPanolero, setIsModoPanolero] = useState(false);
   const [tab, setTab] = useState<TabId>("buscador");
   const [articulos, setArticulos] = useState<Articulo[]>([]);
-  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const themeName: ThemeName = isDarkMode ? "dark" : "light";
   const theme = Colors[themeName];
 
-  const refreshArticulos = useCallback(async (opts?: { fromServer?: boolean }) => {
+  const loadCatalog = useCallback(async (opts?: { forceServer?: boolean }) => {
     setLoadError(null);
     try {
-      const col = collection(db, "articulos");
-      const snap = opts?.fromServer ? await getDocsFromServer(col) : await getDocs(col);
-      const lista: Articulo[] = [];
-      snap.forEach((d) => lista.push({ id: d.id, ...d.data() } as Articulo));
+      const lista = await ensureCatalogLoaded(opts);
       setArticulos(lista);
+      return lista;
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "Error al cargar artículos.");
-    } finally {
-      setLoading(false);
+      const msg = e instanceof Error ? e.message : "Error al cargar artículos.";
+      setLoadError(msg);
+      const mem = getCatalogFromMemory();
+      if (mem.length) return mem;
+      throw e;
     }
   }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeName;
   }, [themeName]);
-
-  useEffect(() => {
-    void refreshArticulos();
-  }, [refreshArticulos]);
 
   useEffect(() => {
     if (!isModoPanolero && tab === "estanterias") setTab("buscador");
@@ -526,9 +623,8 @@ export default function App() {
     isModoPanolero,
     setIsModoPanolero,
     articulos,
-    loading,
     loadError,
-    refreshArticulos,
+    loadCatalog,
   };
 
   return (
