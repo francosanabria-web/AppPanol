@@ -9,9 +9,10 @@ import {
 import { doc, updateDoc } from "firebase/firestore";
 import {
   ensureCatalogLoaded,
-  fetchArticuloById,
   filterArticulos,
   getCatalogFromMemory,
+  isCatalogLoaded,
+  MAX_SEARCH_RESULTS,
   patchArticuloInCatalog,
 } from "./articulosService";
 import { db } from "./firebase";
@@ -60,7 +61,7 @@ type AppCtx = {
   setIsModoPanolero: (v: boolean) => void;
   articulos: Articulo[];
   loadError: string | null;
-  loadCatalog: (opts?: { forceServer?: boolean }) => Promise<Articulo[]>;
+  loadCatalog: () => Promise<Articulo[]>;
 };
 
 const AppContext = createContext<AppCtx | null>(null);
@@ -110,24 +111,38 @@ function BuscadorScreen() {
   const [searchText, setSearchText] = useState("");
   const [buscando, setBuscando] = useState(false);
   const [modoLista, setModoLista] = useState<"recientes" | "busqueda">("recientes");
+  const [totalCoincidencias, setTotalCoincidencias] = useState(0);
   const [modalVisible, setModalVisible] = useState(false);
   const [itemEditando, setItemEditando] = useState<Articulo | null>(null);
   const [nuevoAlias, setNuevoAlias] = useState("");
+
+  const aplicarResultados = (items: Articulo[], total: number) => {
+    setFiltered(items);
+    setTotalCoincidencias(total);
+    setModoLista("busqueda");
+    for (const item of items.slice(0, 3)) addRecentArticulo(item);
+  };
 
   const ejecutarBusqueda = async () => {
     const q = searchText.trim();
     if (!q) {
       setFiltered(getRecentArticulos());
       setModoLista("recientes");
+      setTotalCoincidencias(0);
       return;
     }
+
+    if (isCatalogLoaded()) {
+      const { items, totalMatches } = filterArticulos(getCatalogFromMemory(), q);
+      aplicarResultados(items, totalMatches);
+      return;
+    }
+
     setBuscando(true);
     try {
       const catalog = await loadCatalog();
-      const resultados = filterArticulos(catalog, q);
-      setFiltered(resultados);
-      setModoLista("busqueda");
-      for (const item of resultados.slice(0, 3)) addRecentArticulo(item);
+      const { items, totalMatches } = filterArticulos(catalog, q);
+      aplicarResultados(items, totalMatches);
     } finally {
       setBuscando(false);
     }
@@ -152,7 +167,6 @@ function BuscadorScreen() {
     );
     setModalVisible(false);
     setItemEditando(null);
-    void fetchArticuloById(itemEditando.id);
   };
 
   if (buscando) {
@@ -189,7 +203,11 @@ function BuscadorScreen() {
       <p className="hint" style={{ marginTop: -8, marginBottom: 12 }}>
         {modoLista === "recientes"
           ? "Últimos artículos consultados"
-          : "Resultados de búsqueda"}
+          : totalCoincidencias > MAX_SEARCH_RESULTS
+            ? `Mostrando ${MAX_SEARCH_RESULTS} de ${totalCoincidencias} coincidencias — acotá la búsqueda`
+            : totalCoincidencias > 0
+              ? `${totalCoincidencias} coincidencia${totalCoincidencias === 1 ? "" : "s"}`
+              : "Resultados de búsqueda"}
       </p>
 
       {loadError ? <p className="empty">{loadError}</p> : null}
@@ -270,9 +288,7 @@ function ConfigScreen() {
     isModoPanolero,
     setIsModoPanolero,
     loadError,
-    loadCatalog,
   } = useApp();
-  const [actualizando, setActualizando] = useState(false);
   const [modalClaveVisible, setModalClaveVisible] = useState(false);
   const [claveIngresada, setClaveIngresada] = useState("");
 
@@ -336,32 +352,6 @@ function ConfigScreen() {
         </div>
       </div>
 
-      {isModoPanolero ? (
-        <div className="card-config" style={{ marginTop: 16 }}>
-          <div className="config-row">
-            <div style={{ flex: 1 }}>
-              <div className="desc" style={{ margin: 0, fontSize: 16 }}>
-                Actualizar catálogo
-              </div>
-              <div className="hint">
-                Descarga cambios de la nube (solo si hubo actualización desde escritorio).
-              </div>
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={actualizando}
-              onClick={() => {
-                setActualizando(true);
-                void loadCatalog({ forceServer: true }).finally(() => setActualizando(false));
-              }}
-            >
-              {actualizando ? "…" : "↻"}
-            </button>
-          </div>
-        </div>
-      ) : null}
-
       <p className="empty" style={{ marginTop: 40 }}>
         App web — Pañol
       </p>
@@ -422,6 +412,13 @@ function EstanteriasScreen() {
 
   useEffect(() => {
     let cancel = false;
+
+    if (isCatalogLoaded()) {
+      setArticulos(getCatalogFromMemory());
+      setCargando(false);
+      return;
+    }
+
     setCargando(true);
     void loadCatalog()
       .then((lista) => {
@@ -592,10 +589,10 @@ export default function App() {
   const themeName: ThemeName = isDarkMode ? "dark" : "light";
   const theme = Colors[themeName];
 
-  const loadCatalog = useCallback(async (opts?: { forceServer?: boolean }) => {
+  const loadCatalog = useCallback(async () => {
     setLoadError(null);
     try {
-      const lista = await ensureCatalogLoaded(opts);
+      const lista = await ensureCatalogLoaded();
       setArticulos(lista);
       return lista;
     } catch (e) {

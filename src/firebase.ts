@@ -18,7 +18,10 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-/** Caché local en el navegador: reabrir la app suele costar 0 lecturas hasta que se actualice desde servidor. */
+/**
+ * Caché persistente en el celular (IndexedDB). Permanece entre sesiones hasta que
+ * el usuario borre datos del sitio. getDocs reutiliza documentos sin cambios sin lecturas nuevas.
+ */
 export const db = (() => {
   try {
     return initializeFirestore(app, {
