@@ -1,0 +1,18 @@
+# Dependencias (se reinstalan con npm install)
+node_modules/
+
+# Compilado de producción (Vercel lo genera solo)
+dist/
+
+# Logs y temporales
+*.log
+npm-debug.log*
+
+# Variables de entorno
+.env
+.env.*
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/
