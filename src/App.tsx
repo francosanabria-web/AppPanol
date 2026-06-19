@@ -18,6 +18,14 @@ import {
 import { db } from "./firebase";
 import { parseUbicacion } from "./parseUbicacion";
 import { addRecentArticulo, getRecentArticulos, updateRecentArticulo } from "./recentArticulos";
+import {
+  contarCargados,
+  getConteo,
+  getConteoMap,
+  limpiarConteo,
+  setConteo,
+} from "./conteoStore";
+import { aNumero, exportarYCompartir, type ModoExport } from "./exportConteo";
 import type { Articulo } from "./types";
 
 export type { Articulo } from "./types";
@@ -105,6 +113,17 @@ function IconSettings({ active }: { active: boolean }) {
   );
 }
 
+function IconCount({ active }: { active: boolean }) {
+  const c = active ? "var(--primary)" : "var(--icon)";
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2">
+      <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" strokeLinecap="round" />
+      <rect x="9" y="3" width="6" height="4" rx="1" />
+      <path d="M8 11h2M8 15h2M14 11l2 2 3-3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function BuscadorScreen() {
   const { isModoPanolero, loadCatalog, loadError } = useApp();
   const [filtered, setFiltered] = useState<Articulo[]>(() => getRecentArticulos());
@@ -156,7 +175,11 @@ function BuscadorScreen() {
 
   const guardarAlias = async () => {
     if (!itemEditando) return;
-    const alias = nuevoAlias.trim();
+    const alias = nuevoAlias
+      .split("\n")
+      .map((linea) => linea.trim())
+      .filter(Boolean)
+      .join("\n");
     const articuloRef = doc(db, "articulos", itemEditando.id);
     await updateDoc(articuloRef, { alias });
     const actualizado = { ...itemEditando, alias };
@@ -242,7 +265,16 @@ function BuscadorScreen() {
               )}
             </div>
             <div className="desc">{item.desc}</div>
-            {item.alias ? <div className="alias">🗣️ {item.alias}</div> : null}
+            {item.alias
+              ? item.alias
+                  .split("\n")
+                  .filter(Boolean)
+                  .map((linea, i) => (
+                    <div className="alias" key={i}>
+                      🗣️ {linea}
+                    </div>
+                  ))
+              : null}
             <div className="datos">
               <span className="stock">Stock: {item.stock}</span>
               <span className="ubic">{item.ubicacion}</span>
@@ -256,12 +288,12 @@ function BuscadorScreen() {
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <div className="modal-title">Asignar nombre fácil</div>
             <p className="hint" style={{ marginBottom: 12 }}>
-              {itemEditando?.desc}
+              {itemEditando?.desc} — Enter para agregar otro alias en una línea nueva.
             </p>
-            <input
+            <textarea
               className="input-search"
-              style={{ marginBottom: 0 }}
-              placeholder="Ej: Manguera negra chica"
+              style={{ marginBottom: 0, minHeight: 96, resize: "vertical", lineHeight: 1.5 }}
+              placeholder={"Ej: Manguera negra chica\nManguerita\nManguera 1/2"}
               value={nuevoAlias}
               onChange={(e) => setNuevoAlias(e.target.value)}
               autoFocus
@@ -409,6 +441,7 @@ function EstanteriasScreen() {
   const [cargando, setCargando] = useState(true);
   const [estSearch, setEstSearch] = useState("");
   const [filtroActivo, setFiltroActivo] = useState("");
+  const [soloConStock, setSoloConStock] = useState(false);
 
   useEffect(() => {
     let cancel = false;
@@ -438,15 +471,16 @@ function EstanteriasScreen() {
 
   const articulosFiltrados = useMemo(() => {
     const q = filtroActivo.toLowerCase();
-    if (!q) return articulos;
     const palabras = q.split(/\s+/).filter(Boolean);
     return articulos.filter((art) => {
+      if (soloConStock && aNumero(art.stock) <= 0) return false;
+      if (palabras.length === 0) return true;
       const p = parseUbicacion(art.ubicacion);
       if (!p) return false;
       const hay = `${p.raw} ${p.panol} ${p.estanteria} ${p.posicion}`.toLowerCase();
       return palabras.every((w) => hay.includes(w));
     });
-  }, [articulos, filtroActivo]);
+  }, [articulos, filtroActivo, soloConStock]);
 
   const tree = useMemo(() => {
     const t: Record<number, Record<string, Record<string, Articulo[]>>> = {};
@@ -493,6 +527,14 @@ function EstanteriasScreen() {
             if (e.key === "Enter") aplicarFiltroEstanterias();
           }}
         />
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={soloConStock}
+            onChange={(e) => setSoloConStock(e.target.checked)}
+          />
+          Ver solo artículos con stock
+        </label>
         {loadError ? <p className="empty">{loadError}</p> : null}
         <p className="empty">{emptyMsg}</p>
       </div>
@@ -513,6 +555,14 @@ function EstanteriasScreen() {
           if (e.key === "Enter") aplicarFiltroEstanterias();
         }}
       />
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={soloConStock}
+          onChange={(e) => setSoloConStock(e.target.checked)}
+        />
+        Ver solo artículos con stock
+      </label>
       <p className="hint" style={{ marginBottom: 12 }}>
         Formato: primer dígito = pañol (1–4), cuatro dígitos = estantería, letras = altura (ej. C o SP). Podés usar varias palabras.
       </p>
@@ -577,7 +627,248 @@ function EstanteriasScreen() {
   );
 }
 
-type TabId = "buscador" | "estanterias" | "config";
+function ConteoScreen() {
+  const { loadCatalog, loadError } = useApp();
+  const [articulos, setArticulos] = useState<Articulo[]>([]);
+  const [cargando, setCargando] = useState(true);
+  const [estSearch, setEstSearch] = useState("");
+  const [filtroActivo, setFiltroActivo] = useState("");
+  const [modoBusqueda, setModoBusqueda] = useState<"ubicacion" | "codigo">("ubicacion");
+  const [soloConStock, setSoloConStock] = useState(false);
+  const [conteo, setConteoState] = useState(() => getConteoMap());
+  const [cargados, setCargados] = useState(() => contarCargados());
+
+  useEffect(() => {
+    let cancel = false;
+    if (isCatalogLoaded()) {
+      setArticulos(getCatalogFromMemory());
+      setCargando(false);
+      return;
+    }
+    setCargando(true);
+    void loadCatalog()
+      .then((lista) => {
+        if (!cancel) setArticulos(lista);
+      })
+      .finally(() => {
+        if (!cancel) setCargando(false);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [loadCatalog]);
+
+  const cambiarConteo = (id: string, valor: string) => {
+    const limpio = valor.replace(/[^0-9.,]/g, "");
+    setConteo(id, limpio);
+    setConteoState(getConteoMap());
+    setCargados(contarCargados());
+  };
+
+  const articulosFiltrados = useMemo(() => {
+    const q = filtroActivo.toLowerCase();
+    const palabras = q.split(/\s+/).filter(Boolean);
+    return articulos.filter((art) => {
+      if (soloConStock && aNumero(art.stock) <= 0) return false;
+      if (palabras.length === 0) return true;
+      if (modoBusqueda === "codigo") {
+        const hay = `${art.codigo ?? ""} ${art.desc ?? ""} ${art.alias ?? ""}`.toLowerCase();
+        return palabras.every((w) => hay.includes(w));
+      }
+      const p = parseUbicacion(art.ubicacion);
+      if (!p) return false;
+      const hay = `${p.raw} ${p.panol} ${p.estanteria} ${p.posicion}`.toLowerCase();
+      return palabras.every((w) => hay.includes(w));
+    });
+  }, [articulos, filtroActivo, soloConStock, modoBusqueda]);
+
+  const tree = useMemo(() => {
+    const t: Record<number, Record<string, Record<string, Articulo[]>>> = {};
+    for (const art of articulosFiltrados) {
+      const p = parseUbicacion(art.ubicacion);
+      if (!p) continue;
+      if (!t[p.panol]) t[p.panol] = {};
+      if (!t[p.panol][p.estanteria]) t[p.panol][p.estanteria] = {};
+      if (!t[p.panol][p.estanteria][p.posicion]) t[p.panol][p.estanteria][p.posicion] = [];
+      t[p.panol][p.estanteria][p.posicion].push(art);
+    }
+    return t;
+  }, [articulosFiltrados]);
+
+  const panoles = useMemo(() => Object.keys(tree).map(Number).sort((a, b) => a - b), [tree]);
+
+  const exportar = async (modo: ModoExport, lista: Articulo[], prefijo: string) => {
+    await exportarYCompartir(prefijo, lista, getConteoMap(), modo);
+  };
+
+  const reiniciar = () => {
+    if (!window.confirm("¿Borrar todos los conteos cargados en este celular?")) return;
+    limpiarConteo();
+    setConteoState({});
+    setCargados(0);
+  };
+
+  if (cargando) {
+    return (
+      <div className="screen centro">
+        <div className="spinner" />
+        <p className="hint" style={{ marginTop: 12 }}>
+          Cargando inventario…
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div className="header-row">
+        <h1 className="title">Conteo</h1>
+      </div>
+
+      <div className="seg">
+        <button
+          type="button"
+          className={`seg-btn ${modoBusqueda === "ubicacion" ? "active" : ""}`}
+          onClick={() => setModoBusqueda("ubicacion")}
+        >
+          Por estantería
+        </button>
+        <button
+          type="button"
+          className={`seg-btn ${modoBusqueda === "codigo" ? "active" : ""}`}
+          onClick={() => setModoBusqueda("codigo")}
+        >
+          Por código
+        </button>
+      </div>
+
+      <input
+        className="input-search"
+        placeholder={
+          modoBusqueda === "codigo"
+            ? "Buscar por código, descripción o alias… (Enter)"
+            : "Buscar ubicación (ej. 10065C, pañol 2…)… (Enter)"
+        }
+        value={estSearch}
+        onChange={(e) => setEstSearch(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") setFiltroActivo(estSearch.trim());
+        }}
+      />
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={soloConStock}
+          onChange={(e) => setSoloConStock(e.target.checked)}
+        />
+        Ver solo artículos con stock
+      </label>
+
+      <div className="export-bar">
+        <button type="button" className="btn btn-primary" onClick={() => void exportar("parcial", articulos, "conteo_parcial")}>
+          Exportar parcial
+        </button>
+        <button type="button" className="btn btn-stock" onClick={() => void exportar("final", articulos, "conteo_final")}>
+          Exportar final
+        </button>
+      </div>
+      <p className="hint" style={{ marginBottom: 12 }}>
+        {cargados} artículo{cargados === 1 ? "" : "s"} con conteo cargado.{" "}
+        <button type="button" className="link-btn" onClick={reiniciar}>
+          Reiniciar conteo
+        </button>
+      </p>
+
+      {loadError ? <p className="empty">{loadError}</p> : null}
+
+      {panoles.length === 0 ? (
+        <p className="empty">
+          No hay artículos con ubicación en formato pañol/estantería/posición (ej. 10065C o 4000SP).
+        </p>
+      ) : (
+        panoles.map((panol) => {
+          const ests = tree[panol];
+          const estKeys = Object.keys(ests).sort(sortEstanterias);
+          return (
+            <details key={panol} className="details-nested">
+              <summary>Pañol {panol}</summary>
+              <div className="details-body">
+                {estKeys.map((est) => {
+                  const posMap = ests[est];
+                  const posKeys = Object.keys(posMap).sort(sortPosiciones);
+                  const itemsEst = posKeys.flatMap((pk) => posMap[pk]);
+                  return (
+                    <details key={`${panol}-${est}`} className="details-nested">
+                      <summary>
+                        Estantería {est} — {itemsEst.length} artículo{itemsEst.length === 1 ? "" : "s"}
+                      </summary>
+                      <div className="details-body">
+                        <button
+                          type="button"
+                          className="btn btn-cancel btn-export-est"
+                          onClick={() => void exportar("final", itemsEst, `conteo_est_${panol}_${est}`)}
+                        >
+                          ⬆ Exportar estantería {est} (todas las letras)
+                        </button>
+                        {posKeys.map((pos) => {
+                          const items = posMap[pos];
+                          return (
+                            <details key={`${panol}-${est}-${pos}`} className="details-nested">
+                              <summary>
+                                Posición {pos} — {items.length} artículo{items.length === 1 ? "" : "s"}
+                              </summary>
+                              <div className="details-body">
+                                {items.map((item) => {
+                                  const conteoVal = conteo[item.id] ?? "";
+                                  const dif = conteoVal === "" ? null : aNumero(conteoVal) - aNumero(item.stock);
+                                  return (
+                                    <div key={item.id} className="conteo-card">
+                                      <div className="row-between">
+                                        <span className="codigo">{item.codigo}</span>
+                                        <span className="ubic">{item.ubicacion}</span>
+                                      </div>
+                                      <div className="desc" style={{ fontSize: 15 }}>
+                                        {item.desc}
+                                      </div>
+                                      <div className="conteo-row">
+                                        <span className="stock">Stock: {item.stock}</span>
+                                        <input
+                                          className="conteo-input"
+                                          inputMode="decimal"
+                                          pattern="[0-9.,]*"
+                                          placeholder="Conteo"
+                                          value={conteoVal}
+                                          onChange={(e) => cambiarConteo(item.id, e.target.value)}
+                                        />
+                                        {dif !== null ? (
+                                          <span className={`dif ${dif === 0 ? "dif-ok" : "dif-bad"}`}>
+                                            {dif > 0 ? `+${dif}` : dif}
+                                          </span>
+                                        ) : (
+                                          <span className="dif" />
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            </details>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+type TabId = "buscador" | "estanterias" | "conteo" | "config";
 
 export default function App() {
   const [isDarkMode, setIsDarkMode] = useState(false);
@@ -609,7 +900,7 @@ export default function App() {
   }, [themeName]);
 
   useEffect(() => {
-    if (!isModoPanolero && tab === "estanterias") setTab("buscador");
+    if (!isModoPanolero && (tab === "estanterias" || tab === "conteo")) setTab("buscador");
   }, [isModoPanolero, tab]);
 
   const ctx: AppCtx = {
@@ -629,6 +920,7 @@ export default function App() {
       <div className="app-shell">
         {tab === "buscador" ? <BuscadorScreen /> : null}
         {tab === "estanterias" ? <EstanteriasScreen /> : null}
+        {tab === "conteo" ? <ConteoScreen /> : null}
         {tab === "config" ? <ConfigScreen /> : null}
 
         <nav className="tabbar">
@@ -644,6 +936,16 @@ export default function App() {
             >
               <IconShelf active={tab === "estanterias"} />
               Estanterías
+            </button>
+          ) : null}
+          {isModoPanolero ? (
+            <button
+              type="button"
+              className={`tab ${tab === "conteo" ? "active" : ""}`}
+              onClick={() => setTab("conteo")}
+            >
+              <IconCount active={tab === "conteo"} />
+              Conteo
             </button>
           ) : null}
           <button type="button" className={`tab ${tab === "config" ? "active" : ""}`} onClick={() => setTab("config")}>

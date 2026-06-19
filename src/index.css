@@ -348,3 +348,117 @@ body,
 .mini-card .ubic {
   font-size: 13px;
 }
+
+/* Checkbox de filtro (Estanterías / Conteo) */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 15px;
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--primary);
+}
+
+/* Selector segmentado (modo de búsqueda en Conteo) */
+.seg {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.seg-btn {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--icon);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.seg-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+/* Barra de exportación del conteo */
+.export-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.export-bar .btn {
+  flex: 1;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.btn-export-est {
+  width: 100%;
+  margin-bottom: 10px;
+  border: 1px dashed var(--border);
+}
+
+/* Tarjeta de conteo */
+.conteo-card {
+  background: var(--card);
+  border-radius: 6px;
+  border-left: 3px solid var(--primary);
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.conteo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.conteo-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 16px;
+  color: var(--text);
+  text-align: center;
+}
+
+.dif {
+  min-width: 48px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.dif-ok {
+  color: var(--stock);
+}
+
+.dif-bad {
+  color: #e74c3c;
+}
